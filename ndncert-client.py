@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 class ECDHState():
     def __init__(self):
         self.private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        self.derived_key = None
 
     def getBase64PubKey(self):
         pub_key = self.private_key.public_key()
@@ -38,6 +39,9 @@ class ClientModule():
         self.anchor = CertificateV2()
         self.anchor.wireDecode(Blob(b64decode("Bv0DgQc7CANuZG4IA2VkdQgHbWVtcGhpcwgIYWdhd2FuZGUIA0tFWQgIo6cuGT4GVKEIAk5BCAn9AAABbQxT3hEUCRgBAhkEADbugBX9ASYwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDII1sLOE7cCQVTKoGjeM5o/mxWqhMx0siLHJ81Ee/eUCNAMxA0w1oxAoTGQ8HbNP3vShZfvMJ/11Jiqus2wAWlNjRWvQShNv5MueU8kYtOGTbiqr/I1EpSRQ2aJX3s49CoskoWMzf6knK4ELleH3/EBUPGJK0cpHHdFOjwlzO3Y3Rtc/DhHVTVsBWvPS1wKgnzBFO36k73gAQJi4bOc0ggPPcK3UfVzpz8XTe+IcS2N9jew+kDqoZaL+HHz26PIAwQvXQFXPhE6y/nH/4yes24DlK3u+vHTQHXRKcLNSpYvmS6KrHvt2t01Fk0hXxeFkbh4XaE73eXB9AzNw+AccovAgMBAAEW/QEHGwEBHCQHIggDbmRuCANlZHUIB21lbXBoaXMIA0tFWQgI9bIQPIJIGTf9AP0m/QD+DzIwMTkwOTA2VDE1MjQ0Nf0A/w8yMDIwMDkwNlQxNTI0NDX9AQKw/QIAD/0CAQdhZHZpc29y/QICAP0CACH9AgEFZW1haWz9AgIUYWdhd2FuZGVAbWVtcGhpcy5lZHX9AgAf/QIBCGZ1bGxuYW1l/QICD0FzaGxlc2ggR2F3YW5kZf0CAA39AgEFZ3JvdXD9AgIA/QIAD/0CAQdob21ldXJs/QICAP0CAC39AgEMb3JnYW5pemF0aW9u/QICGVRoZSBVbml2ZXJzaXR5IG9mIE1lbXBoaXMX/QEAMZ4XLBqFjABr/k58Gq6GrNfaDMb+NLyJYF5X2mDwKnUgp1is83eg/90LqO8AVGYdyirKfr23HP4565iJXhOmFgRbP+faN++0oUTXdUSvDm43Rp+OCHr9uGPPYjUjUeNhrD7Fxfq5m3EHNMxQqnVJOODpVrF3D0EYJ4Q4IETmxrSmuDpH9I92fs7rU/51aNAZbU7DewPmcq/IrY4RO5G9pfYR+gu/gyO/L8gN39EhBbsOYWOh3EYOdAJlSktP1evL/5yRdQq7bVLyG6dZSsYQ1x4XDJ9epUesZ+TbCK/lXfRrmFG9uk8TI/rZNAYfUiQifnsNvRu34PcyELiFJ/h2xA==")))
         self.identityName = ""
+        self.status = None
+        self.requestId = None
+        self.challenges = None
 
     def sendProbeInterest(self):
         probeInterest = Interest(Name(self.caPrefix).append("CA").append("_PROBE"))
@@ -146,18 +150,29 @@ class ClientModule():
 
         contentJson = json.loads(content.__str__())
         peerKeyBase64 = contentJson['ecdh-pub']
+        self.status = contentJson['status']
+        self.requestId = contentJson['request-id']
+        self.challenges = contentJson['challenges']
 
         serverEcPubKey = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b64decode(peerKeyBase64))
 
         shared_key = self.ecdh.private_key.exchange(ec.ECDH(), serverEcPubKey)
         derived_key = HKDF(
             algorithm=hashes.SHA256(),
-            length=32,
+            length=16,  # 16 for AES128 and 32 for AES256?
             salt=contentJson['salt'].encode(),
             info=b'handshake data',
             backend=default_backend()).derive(shared_key)
 
-        print(derived_key)
+        ecdh.derived_key = derived_key
+
+        challengeInterestName = Name(self.caPrefix).append("CA").append("_CHALLENGE").append(self.requestId)
+        challengeInterest = Interest(challengeInterestName)
+        challengeInterest.setMustBeFresh(true)
+        challengeInterest.setCanBePrefix(false)
+
+        # Encrypt the interest parameters
+        challengeJson = json.dumps({"selected-challenge": "Email", "email": "agawande@memphis.edu"})
 
     def onTimeout(self, interest):
         print("Got timeout for interest: {}".format(interest.getName()))
