@@ -1,4 +1,5 @@
 import sys, time, json
+from base64 import b64decode, b64encode
 
 from pyndn import Name
 from pyndn import Blob
@@ -10,8 +11,9 @@ from pyndn.security.v2 import CertificateV2
 from pyndn.security import KeyChain
 from pyndn.security.signing_info import SigningInfo
 from pyndn.validity_period import ValidityPeriod
-from base64 import b64decode, b64encode
 from pyndn.meta_info import ContentType
+from pyndn.encoding.tlv.tlv_encoder import TlvEncoder
+from pyndn.encoding.tlv_0_2_wire_format import Tlv0_2WireFormat
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -19,6 +21,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+#from cryptography.fernet import Fernet  # Uses AES CBC w/ 128 bit key, PKCS7 padding
+
+from Crypto import Random
+from Crypto.Cipher import AES
 
 class ECDHState():
     def __init__(self):
@@ -154,25 +160,60 @@ class ClientModule():
         self.requestId = contentJson['request-id']
         self.challenges = contentJson['challenges']
 
-        serverEcPubKey = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b64decode(peerKeyBase64))
+        print(peerKeyBase64)
 
-        shared_key = self.ecdh.private_key.exchange(ec.ECDH(), serverEcPubKey)
-        derived_key = HKDF(
-            algorithm=hashes.SHA256(),
-            length=16,  # 16 for AES128 and 32 for AES256?
-            salt=contentJson['salt'].encode(),
-            info=b'handshake data',
-            backend=default_backend()).derive(shared_key)
+        serverPubKey = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b64decode(peerKeyBase64))
 
-        ecdh.derived_key = derived_key
+        shared_key = self.ecdh.private_key.exchange(ec.ECDH(), serverPubKey)
+        derived_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=contentJson['salt'].encode(),
+                           info=b'handshake data', backend=default_backend()).derive(shared_key)
+
+        self.ecdh.derived_key = derived_key
+        print(shared_key)
+        for t in shared_key:
+            print(t)
 
         challengeInterestName = Name(self.caPrefix).append("CA").append("_CHALLENGE").append(self.requestId)
         challengeInterest = Interest(challengeInterestName)
-        challengeInterest.setMustBeFresh(true)
-        challengeInterest.setCanBePrefix(false)
+        challengeInterest.setMustBeFresh(True)
+        challengeInterest.setCanBePrefix(False)
 
         # Encrypt the interest parameters
-        challengeJson = json.dumps({"selected-challenge": "Email", "email": "agawande@memphis.edu"})
+        challengeJson = json.dumps({"selected-challenge": "Email", "email": "agawande@memphis.edu"}, indent=4)
+        raw = self.pad(challengeJson, 16)
+        print("raw", raw)
+        iv = Random.new().read(AES.block_size)
+        #cipher = AES.new(self.ecdh.derived_key, AES.MODE_CBC, iv)
+        cipher = AES.new(shared_key, AES.MODE_CBC, iv)
+        print(iv)
+        xx = cipher.encrypt(raw)
+
+        print(cipher.decrypt(xx))
+
+        print("Printing iv:")
+        for t in iv:
+            print(t)
+
+        encoder = TlvEncoder(256)
+        saveLength = len(encoder)
+        encoder.writeBlobTlv(632, iv)
+        encoder.writeBlobTlv(630, cipher.encrypt(raw))
+        #encoder.writeTypeAndLength(36, len(encoder) - saveLength)
+
+        challengeInterest.setApplicationParameters(Blob(encoder.getOutput()))
+        challengeInterest.appendParametersDigestToName()
+
+        self.keyChain.sign(challengeInterest, SigningInfo(self.key))
+
+        with open('foobar.tlv', 'wb') as f:
+        	f.write(challengeInterest.wireEncode().buf())
+        self.face.expressInterest(challengeInterest, self.onChallengeData, self.onTimeout)
+
+    def onChallengeData(self, interest, data):
+        print("Got data: ", data)
+
+    def pad(self, s, blocksize):
+        return s + (blocksize - len(s) % blocksize) * ' '
 
     def onTimeout(self, interest):
         print("Got timeout for interest: {}".format(interest.getName()))
