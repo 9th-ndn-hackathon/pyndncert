@@ -16,6 +16,9 @@ from pyndn.meta_info import ContentType
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 
 class ECDHState():
     def __init__(self):
@@ -119,6 +122,7 @@ class ClientModule():
 
     def onNewData(self, interest, data):
         """
+        !! Again \n in public key??
         Got data:  {
             "ecdh-pub": "Aqxofe3QdsAfgbtS8TMxv31oudNKoSV307ci5gNXm88h\n",
             "salt": "12935684137560555161",
@@ -133,18 +137,27 @@ class ClientModule():
         1. Verify data
         2. Derive shared secret
         """
-        print("Got data: ", data.getContent())
+        content = data.getContent()
+        print("Got data: ", content)
         if not VerificationHelpers.verifyDataSignature(data, self.anchor):
             print("Cannot verify signature from: {}".format(self.caPrefix))
         else:
             print("Successfully verified data with hard-coded certificate")
 
+        contentJson = json.loads(content.__str__())
+        peerKeyBase64 = contentJson['ecdh-pub']
+
+        serverEcPubKey = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b64decode(peerKeyBase64))
+
+        shared_key = self.ecdh.private_key.exchange(ec.ECDH(), serverEcPubKey)
         derived_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=None,
+            salt=contentJson['salt'].encode(),
             info=b'handshake data',
             backend=default_backend()).derive(shared_key)
+
+        print(derived_key)
 
     def onTimeout(self, interest):
         print("Got timeout for interest: {}".format(interest.getName()))
